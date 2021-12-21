@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"hash/crc32"
 	"reflect"
 	"strings"
@@ -243,7 +242,6 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 	ctx, cancel := context.WithCancel(context.Background())
 	o.Cancel = &cancel
 	bookticker := make(chan map[string]interface{}, 50)
-	errCh := make(chan error, 5)
 	refreshCh := make(chan error, 5)
 	symbol = strings.ToUpper(symbol)
 	url := c.SocketEndPointHub(false)
@@ -255,12 +253,7 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 			default:
 				if err := OkexOrderBookSocket(ctx, url, symbol, "orderbook", logger, &bookticker, &refreshCh); err == nil {
 					return
-				} else {
-					// test
-					fmt.Println(err.Error())
 				}
-				errCh <- errors.New("Reconnect websocket")
-				time.Sleep(time.Second)
 			}
 		}
 	}()
@@ -270,9 +263,11 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 			case <-ctx.Done():
 				return
 			default:
-				o.MaintainOrderBook(ctx, symbol, &bookticker, &errCh, &refreshCh)
+				if err := o.MaintainOrderBook(ctx, symbol, &bookticker); err == nil {
+					return
+				}
+				refreshCh <- errors.New("refreshing from maintain orderbook")
 				logger.Warningf("Refreshing %s  local orderbook.\n", symbol)
-				time.Sleep(time.Second)
 			}
 		}
 	}()
@@ -283,22 +278,17 @@ func (o *OrderBookBranch) MaintainOrderBook(
 	ctx context.Context,
 	symbol string,
 	bookticker *chan map[string]interface{},
-	errCh *chan error,
-	refreshCh *chan error,
-) {
+) error {
 	var storage []map[string]interface{}
 	o.SnapShoted = false
 	o.LastUpdatedId = decimal.NewFromInt(0)
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-(*errCh):
-			return
+			return nil
 		default:
 			message := <-(*bookticker)
 			if len(message) != 0 {
-				// spot
 				// for initial orderbook
 				if action, ok := message["action"].(string); ok {
 					switch action {
@@ -313,7 +303,7 @@ func (o *OrderBookBranch) MaintainOrderBook(
 						if len(storage) > 1 {
 							for _, data := range storage {
 								if err := o.SpotUpdateJudge(&data); err != nil {
-									*refreshCh <- err
+									return err
 								}
 							}
 							// clear storage
@@ -321,7 +311,7 @@ func (o *OrderBookBranch) MaintainOrderBook(
 						}
 						// handle incoming data
 						if err := o.SpotUpdateJudge(&message); err != nil {
-							*refreshCh <- err
+							return err
 						}
 					}
 				}
@@ -486,6 +476,7 @@ func OkexOrderBookSocket(
 		case <-ctx.Done():
 			return nil
 		case err := <-*refreshCh:
+			innerErr <- errors.New("restart")
 			return err
 		default:
 			if conn == nil {
