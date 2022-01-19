@@ -157,7 +157,7 @@ func (o *OrderBookBranch) DealWithAskPriceLevel(price, qty decimal.Decimal) {
 
 func (o *OrderBookBranch) Close() {
 	(*o.Cancel)()
-	o.SnapShoted = true
+	o.SnapShoted = false
 	o.Bids.mux.Lock()
 	o.Bids.Book = [][]string{}
 	o.Bids.mux.Unlock()
@@ -266,7 +266,10 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 				if err := o.MaintainOrderBook(ctx, symbol, &bookticker); err == nil {
 					return
 				}
-				refreshCh <- errors.New("refreshing from maintain orderbook")
+				go func() {
+					time.Sleep(time.Second)
+					refreshCh <- errors.New("refreshing from maintain orderbook")
+				}()
 				logger.Warningf("Refreshing %s  local orderbook.\n", symbol)
 			}
 		}
