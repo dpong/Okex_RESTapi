@@ -1,7 +1,6 @@
 package okexapi
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"hash/crc32"
@@ -591,7 +590,6 @@ func Bytes2String(b []byte) string {
 }
 
 func (o *OrderBookBranch) CheckCheckSum(checkSum uint32) error {
-	var buffer bytes.Buffer
 	o.Bids.mux.RLock()
 	o.Asks.mux.RLock()
 	defer o.Bids.mux.RUnlock()
@@ -599,20 +597,20 @@ func (o *OrderBookBranch) CheckCheckSum(checkSum uint32) error {
 	if len(o.Bids.Book) == 0 || len(o.Asks.Book) == 0 {
 		return nil
 	}
+	bidLen := len(o.Bids.Book)
+	askLen := len(o.Asks.Book)
 	var level int = 25
+	var list []string
 	for i := 0; i < level; i++ {
-		buffer.WriteString(o.Bids.Book[i][0])
-		buffer.WriteString(":")
-		buffer.WriteString(o.Bids.Book[i][1])
-		buffer.WriteString(":")
-		buffer.WriteString(o.Asks.Book[i][0])
-		buffer.WriteString(":")
-		buffer.WriteString(o.Asks.Book[i][1])
-		if i != level-1 {
-			buffer.WriteString(":")
+		if i < bidLen {
+			list = append(list, o.Bids.Book[i][:2]...)
+		}
+		if i < askLen {
+			list = append(list, o.Asks.Book[i][:2]...)
 		}
 	}
-	localCheckSum := crc32.ChecksumIEEE(buffer.Bytes())
+	result := strings.Join(list, ":")
+	localCheckSum := crc32.ChecksumIEEE(String2Bytes(result))
 	if localCheckSum != checkSum {
 		return errors.New("checkSum error")
 	}
