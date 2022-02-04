@@ -169,7 +169,10 @@ func (o *OrderBookBranch) Close() {
 func (o *OrderBookBranch) GetBids() ([][]string, bool) {
 	o.Bids.mux.RLock()
 	defer o.Bids.mux.RUnlock()
-	if len(o.Bids.Book) == 0 || !o.SnapShoted {
+	if len(o.Bids.Book) == 0 {
+		return [][]string{}, false
+	}
+	if !o.SnapShoted {
 		return [][]string{}, false
 	}
 	book := o.Bids.Book
@@ -204,7 +207,10 @@ func (o *OrderBookBranch) GetBidsEnoughForValue(value decimal.Decimal) ([][]stri
 func (o *OrderBookBranch) GetAsks() ([][]string, bool) {
 	o.Asks.mux.RLock()
 	defer o.Asks.mux.RUnlock()
-	if len(o.Asks.Book) == 0 || !o.SnapShoted {
+	if len(o.Asks.Book) == 0 {
+		return [][]string{}, !o.SnapShoted
+	}
+	if !o.SnapShoted {
 		return [][]string{}, false
 	}
 	book := o.Asks.Book
@@ -265,10 +271,7 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 				if err := o.MaintainOrderBook(ctx, symbol, &bookticker); err == nil {
 					return
 				}
-				go func() {
-					time.Sleep(time.Second)
-					refreshCh <- errors.New("refreshing from maintain orderbook")
-				}()
+				refreshCh <- errors.New("refreshing from maintain orderbook")
 				logger.Warningf("Refreshing %s  local orderbook.\n", symbol)
 			}
 		}
@@ -281,13 +284,22 @@ func (o *OrderBookBranch) MaintainOrderBook(
 	symbol string,
 	bookticker *chan map[string]interface{},
 ) error {
-	var storage []map[string]interface{}
+	//var storage []map[string]interface{}
 	o.SnapShoted = false
 	o.LastUpdatedId = decimal.NewFromInt(0)
+	reCh := make(chan error, 5)
+	// temp method before okex api updated
+	go func() {
+		time.Sleep(time.Second * 300)
+		reCh <- errors.New("re")
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-reCh:
+			return err
 		default:
 			message := <-(*bookticker)
 			if len(message) != 0 {
@@ -298,19 +310,6 @@ func (o *OrderBookBranch) MaintainOrderBook(
 						o.InitialOrderBook(&message)
 						continue
 					case "update":
-						if !o.SnapShoted {
-							storage = append(storage, message)
-							continue
-						}
-						if len(storage) > 1 {
-							for _, data := range storage {
-								if err := o.SpotUpdateJudge(&data); err != nil {
-									return err
-								}
-							}
-							// clear storage
-							storage = make([]map[string]interface{}, 0)
-						}
 						// handle incoming data
 						if err := o.SpotUpdateJudge(&message); err != nil {
 							return err
@@ -384,7 +383,6 @@ func (o *OrderBookBranch) InitialOrderBook(res *map[string]interface{}) {
 			wg.Wait()
 		}
 	}
-	//o.LastUpdatedId = id
 	o.SnapShoted = true
 }
 
