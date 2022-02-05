@@ -193,13 +193,13 @@ func (o *OrderBookBranch) Close() {
 func (o *OrderBookBranch) GetBids() ([][]string, bool) {
 	o.Bids.mux.RLock()
 	defer o.Bids.mux.RUnlock()
+	if !o.SnapShoted {
+		return [][]string{}, false
+	}
 	if len(o.Bids.Book) == 0 {
 		if o.IfCanRefresh() {
 			o.reCh <- errors.New("re cause len bid is zero")
 		}
-		return [][]string{}, false
-	}
-	if !o.SnapShoted {
 		return [][]string{}, false
 	}
 	book := o.Bids.Book
@@ -234,14 +234,14 @@ func (o *OrderBookBranch) GetBidsEnoughForValue(value decimal.Decimal) ([][]stri
 func (o *OrderBookBranch) GetAsks() ([][]string, bool) {
 	o.Asks.mux.RLock()
 	defer o.Asks.mux.RUnlock()
+	if !o.SnapShoted {
+		return [][]string{}, false
+	}
 	if len(o.Asks.Book) == 0 {
 		if o.IfCanRefresh() {
 			o.reCh <- errors.New("re cause len ask is zero")
 		}
 		return [][]string{}, !o.SnapShoted
-	}
-	if !o.SnapShoted {
-		return [][]string{}, false
 	}
 	book := o.Asks.Book
 	return book, true
