@@ -21,11 +21,29 @@ type OrderBookBranch struct {
 	LastUpdatedId decimal.Decimal
 	SnapShoted    bool
 	Cancel        *context.CancelFunc
+	reCh          chan error
+	lastRefresh   lastRefreshBranch
+}
+
+type lastRefreshBranch struct {
+	mux  sync.RWMutex
+	time time.Time
 }
 
 type BookBranch struct {
 	mux  sync.RWMutex
 	Book [][]string
+}
+
+func (o *OrderBookBranch) IfCanRefresh() bool {
+	o.lastRefresh.mux.Lock()
+	defer o.lastRefresh.mux.Unlock()
+	now := time.Now()
+	if now.After(o.lastRefresh.time.Add(time.Second * 3)) {
+		o.lastRefresh.time = now
+		return true
+	}
+	return false
 }
 
 func (o *OrderBookBranch) UpdateNewComing(message *map[string]interface{}) {
@@ -154,6 +172,12 @@ func (o *OrderBookBranch) DealWithAskPriceLevel(price, qty decimal.Decimal) {
 	}
 }
 
+func (o *OrderBookBranch) RefreshLocalOrderBook(err error) {
+	if o.IfCanRefresh() {
+		o.reCh <- err
+	}
+}
+
 func (o *OrderBookBranch) Close() {
 	(*o.Cancel)()
 	o.SnapShoted = false
@@ -170,6 +194,9 @@ func (o *OrderBookBranch) GetBids() ([][]string, bool) {
 	o.Bids.mux.RLock()
 	defer o.Bids.mux.RUnlock()
 	if len(o.Bids.Book) == 0 {
+		if o.IfCanRefresh() {
+			o.reCh <- errors.New("re cause len bid is zero")
+		}
 		return [][]string{}, false
 	}
 	if !o.SnapShoted {
@@ -208,6 +235,9 @@ func (o *OrderBookBranch) GetAsks() ([][]string, bool) {
 	o.Asks.mux.RLock()
 	defer o.Asks.mux.RUnlock()
 	if len(o.Asks.Book) == 0 {
+		if o.IfCanRefresh() {
+			o.reCh <- errors.New("re cause len ask is zero")
+		}
 		return [][]string{}, !o.SnapShoted
 	}
 	if !o.SnapShoted {
@@ -248,6 +278,7 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 	o.Cancel = &cancel
 	bookticker := make(chan map[string]interface{}, 50)
 	refreshCh := make(chan error, 5)
+	o.reCh = make(chan error, 5)
 	symbol = strings.ToUpper(symbol)
 	url := c.SocketEndPointHub(false)
 	go func() {
@@ -268,11 +299,12 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 			case <-ctx.Done():
 				return
 			default:
-				if err := o.MaintainOrderBook(ctx, symbol, &bookticker); err == nil {
+				err := o.MaintainOrderBook(ctx, symbol, &bookticker)
+				if err == nil {
 					return
 				}
+				logger.Warningf("refreshing %s local orderbook cause: %s", symbol, err.Error())
 				refreshCh <- errors.New("refreshing from maintain orderbook")
-				logger.Warningf("Refreshing %s  local orderbook.\n", symbol)
 			}
 		}
 	}()
@@ -287,18 +319,11 @@ func (o *OrderBookBranch) MaintainOrderBook(
 	//var storage []map[string]interface{}
 	o.SnapShoted = false
 	o.LastUpdatedId = decimal.NewFromInt(0)
-	reCh := make(chan error, 5)
-	// temp method before okex api updated
-	go func() {
-		time.Sleep(time.Second * 300)
-		reCh <- errors.New("re")
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case err := <-reCh:
+		case err := <-o.reCh:
 			return err
 		default:
 			message := <-(*bookticker)
