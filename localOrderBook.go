@@ -241,7 +241,7 @@ func (o *OrderBookBranch) GetAsks() ([][]string, bool) {
 		if o.IfCanRefresh() {
 			o.reCh <- errors.New("re cause len ask is zero")
 		}
-		return [][]string{}, !o.SnapShoted
+		return [][]string{}, false
 	}
 	book := o.Asks.Book
 	return book, true
