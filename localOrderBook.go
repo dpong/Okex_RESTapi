@@ -1,9 +1,12 @@
 package okexapi
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
 	"errors"
 	"hash/crc32"
+	"io/ioutil"
 	"reflect"
 	"strings"
 	"sync"
@@ -331,7 +334,7 @@ func (o *OrderBookBranch) MaintainOrderBook(
 				// for initial orderbook
 				if action, ok := message["action"].(string); ok {
 					switch action {
-					case "snapshot":
+					case "partial":
 						o.InitialOrderBook(&message)
 						continue
 					case "update":
@@ -365,8 +368,8 @@ func (o *OrderBookBranch) SpotUpdateJudge(message *map[string]interface{}) error
 func (o *OrderBookBranch) InitialOrderBook(res *map[string]interface{}) {
 	var wg sync.WaitGroup
 	data := (*res)["data"].([]interface{})
-	for _, item := range data {
-		if book, ok := item.(map[string]interface{}); ok {
+	for _, itemBig := range data {
+		if book, ok := itemBig.(map[string]interface{}); ok {
 			if bids, ok := book["bids"].([]interface{}); ok {
 				wg.Add(1)
 				go func() {
@@ -420,13 +423,8 @@ type OkexWebsocket struct {
 }
 
 type OkexSubscribeMessage struct {
-	Op   string          `json:"op"`
-	Args []OkexPublicArg `json:"args,omitempty"`
-}
-
-type OkexPublicArg struct {
-	Channel string `json:"channel"`
-	Instid  string `json:"instId"`
+	Op   string   `json:"op"`
+	Args []string `json:"args,omitempty"`
 }
 
 func (w *OkexWebsocket) OutOkexErr() map[string]interface{} {
@@ -435,14 +433,18 @@ func (w *OkexWebsocket) OutOkexErr() map[string]interface{} {
 	return m
 }
 
-func DecodingMap(message []byte, logger *log.Logger) (res map[string]interface{}, err error) {
-	if message == nil {
-		err = errors.New("the incoming message is nil")
+func DecodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{}, err error) {
+	body := flate.NewReader(bytes.NewReader(*message))
+	if err != nil {
 		return nil, err
 	}
-	err = json.Unmarshal(message, &res)
+	enflated, err := ioutil.ReadAll(body)
 	if err != nil {
-		if try := Bytes2String(message); try != "pong" {
+		return nil, err
+	}
+	err = json.Unmarshal(enflated, &res)
+	if err != nil {
+		if try := Bytes2String(enflated); try != "pong" {
 			return nil, err
 		}
 	}
@@ -521,7 +523,7 @@ func OkexOrderBookSocket(
 				innerErr <- errors.New("restart")
 				return errors.New(message)
 			}
-			res, err1 := DecodingMap(buf, logger)
+			res, err1 := DecodingMap(&buf, logger)
 			if err1 != nil {
 				d := w.OutOkexErr()
 				*mainCh <- d
@@ -547,21 +549,18 @@ func OkexOrderBookSocket(
 }
 
 func (w *OkexWebsocket) HandleOkexSocketData(res *map[string]interface{}, mainCh *chan map[string]interface{}) error {
-
 	if event, ok := (*res)["event"].(string); ok {
 		switch event {
 		case "subscribe":
-			if data, ok := (*res)["arg"].(map[string]interface{}); ok {
-				channel := data["channel"].(string)
-				inst := data["instId"].(string)
-				w.Logger.Infof("Subscribed %s %s", inst, channel)
+			if channel, ok := (*res)["channel"].(string); ok {
+				w.Logger.Infof("Subscribed %s", channel)
 				return nil
 			}
 		}
 	} else {
 		if action, ok := (*res)["action"].(string); ok {
 			switch action {
-			case "snapshot":
+			case "partial":
 				*mainCh <- *res
 				return nil
 			case "update":
@@ -576,13 +575,13 @@ func (w *OkexWebsocket) HandleOkexSocketData(res *map[string]interface{}, mainCh
 func GetOkexSubscribeMessage(channel, symbol string) (message []byte) {
 	switch channel {
 	case "orderbook":
-		arg := OkexPublicArg{
-			Channel: "books50-l2-tbt",
-			Instid:  symbol,
-		}
+		var buffer bytes.Buffer
+		buffer.WriteString("spot/depth_l2_tbt:")
+		buffer.WriteString(symbol)
+		arg := buffer.String()
 		sub := OkexSubscribeMessage{
 			Op:   "subscribe",
-			Args: []OkexPublicArg{arg},
+			Args: []string{arg},
 		}
 		by, err := json.Marshal(sub)
 		if err != nil {

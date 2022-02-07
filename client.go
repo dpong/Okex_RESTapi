@@ -159,11 +159,12 @@ func (c *Client) SocketEndPointHub(private bool) (endpoint string) {
 			endpoint = "wss://ws.okex.com:8443/ws/v5/private"
 		}
 	default:
+		// didn't see aws entry on lastest version so far
 		switch c.aws {
 		case true:
-			endpoint = "wss://wspap.okex.com:8443/ws/v5/public?brokerId=9999"
+			endpoint = "wss://real.okex.com:8443/ws/v3"
 		default:
-			endpoint = "wss://ws.okex.com:8443/ws/v5/public"
+			endpoint = "wss://real.okex.com:8443/ws/v3"
 		}
 	}
 	return endpoint
