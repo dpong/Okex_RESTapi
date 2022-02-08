@@ -498,6 +498,8 @@ func OkexOrderBookSocket(
 			}
 		}
 	}()
+	read := time.NewTicker(time.Millisecond * 50)
+	defer read.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -505,7 +507,7 @@ func OkexOrderBookSocket(
 		case err := <-*refreshCh:
 			innerErr <- errors.New("restart")
 			return err
-		default:
+		case <-read.C:
 			if conn == nil {
 				d := w.OutOkexErr()
 				*mainCh <- d
@@ -544,6 +546,8 @@ func OkexOrderBookSocket(
 			if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 				return err
 			}
+		default:
+			time.Sleep(time.Millisecond * 10)
 		}
 	}
 }
