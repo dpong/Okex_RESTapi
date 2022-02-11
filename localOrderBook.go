@@ -297,6 +297,8 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 				if err := OkexOrderBookSocket(ctx, url, symbol, "orderbook", logger, &bookticker, &refreshCh); err == nil {
 					return
 				}
+				// connection limit by okex
+				time.Sleep(time.Second)
 			}
 		}
 	}()
@@ -502,8 +504,6 @@ func OkexOrderBookSocket(
 			}
 		}
 	}()
-	read := time.NewTicker(time.Millisecond * 50)
-	defer read.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -511,7 +511,7 @@ func OkexOrderBookSocket(
 		case err := <-*refreshCh:
 			innerErr <- errors.New("restart")
 			return err
-		case <-read.C:
+		default:
 			if conn == nil {
 				d := w.OutOkexErr()
 				*mainCh <- d
@@ -550,8 +550,6 @@ func OkexOrderBookSocket(
 			if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 				return err
 			}
-		default:
-			time.Sleep(time.Millisecond * 10)
 		}
 	}
 }
@@ -567,6 +565,32 @@ func (w *OkexWebsocket) HandleOkexSocketData(res *map[string]interface{}, mainCh
 		}
 	} else {
 		if action, ok := (*res)["action"].(string); ok {
+			if dataSet, ok := (*res)["data"].([]interface{}); !ok {
+				m := w.OutOkexErr()
+				*mainCh <- m
+				return errors.New("got nil when getting data for event time")
+			} else {
+				for _, item := range dataSet {
+					data := item.(map[string]interface{})
+					if st, ok := data["timestamp"].(string); !ok {
+						m := w.OutOkexErr()
+						*mainCh <- m
+						return errors.New("got nil when updating event time")
+					} else {
+						stamp, err := TimeStringToDateTime(st)
+						if err != nil {
+							m := w.OutOkexErr()
+							*mainCh <- m
+							return errors.New("fail to parse time when getting event time")
+						}
+						if time.Now().After(stamp.Add(time.Second * 5)) {
+							m := w.OutOkexErr()
+							*mainCh <- m
+							return errors.New("websocket data delay more than 5 sec")
+						}
+					}
+				}
+			}
 			switch action {
 			case "partial":
 				*mainCh <- *res
@@ -645,4 +669,13 @@ func (o *OrderBookBranch) CheckCheckSum(checkSum uint32) error {
 		return errors.New("checkSum error")
 	}
 	return nil
+}
+
+func TimeStringToDateTime(input string) (time.Time, error) {
+	layout := "2006-01-02T15:04:05.999Z"
+	t, err := time.Parse(layout, input)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return t, nil
 }
