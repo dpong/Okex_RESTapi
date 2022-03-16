@@ -294,7 +294,7 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 			case <-ctx.Done():
 				return
 			default:
-				if err := OkexOrderBookSocket(ctx, url, symbol, "orderbook", logger, &bookticker, &refreshCh); err == nil {
+				if err := okexOrderBookSocket(ctx, url, symbol, "orderbook", logger, &bookticker, &refreshCh); err == nil {
 					return
 				}
 				// connection limit by okex
@@ -308,7 +308,7 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 			case <-ctx.Done():
 				return
 			default:
-				err := o.MaintainOrderBook(ctx, symbol, &bookticker)
+				err := o.maintainOrderBook(ctx, symbol, &bookticker)
 				if err == nil {
 					return
 				}
@@ -320,7 +320,7 @@ func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBra
 	return &o
 }
 
-func (o *OrderBookBranch) MaintainOrderBook(
+func (o *OrderBookBranch) maintainOrderBook(
 	ctx context.Context,
 	symbol string,
 	bookticker *chan map[string]interface{},
@@ -341,11 +341,11 @@ func (o *OrderBookBranch) MaintainOrderBook(
 				if action, ok := message["action"].(string); ok {
 					switch action {
 					case "partial":
-						o.InitialOrderBook(&message)
+						o.initialOrderBook(&message)
 						continue
 					case "update":
 						// handle incoming data
-						if err := o.SpotUpdateJudge(&message); err != nil {
+						if err := o.spotUpdateJudge(&message); err != nil {
 							return err
 						}
 					}
@@ -355,13 +355,13 @@ func (o *OrderBookBranch) MaintainOrderBook(
 	}
 }
 
-func (o *OrderBookBranch) SpotUpdateJudge(message *map[string]interface{}) error {
+func (o *OrderBookBranch) spotUpdateJudge(message *map[string]interface{}) error {
 	if data, ok := (*message)["data"].([]interface{}); ok {
 		o.UpdateNewComing(message)
 		for _, item := range data {
 			if book, ok := item.(map[string]interface{}); ok {
 				if checkSum, ok := book["checksum"].(float64); ok {
-					if err := o.CheckCheckSum(uint32(checkSum)); err != nil {
+					if err := o.checkCheckSum(uint32(checkSum)); err != nil {
 						return err
 					}
 				}
@@ -371,7 +371,7 @@ func (o *OrderBookBranch) SpotUpdateJudge(message *map[string]interface{}) error
 	return nil
 }
 
-func (o *OrderBookBranch) InitialOrderBook(res *map[string]interface{}) {
+func (o *OrderBookBranch) initialOrderBook(res *map[string]interface{}) {
 	var wg sync.WaitGroup
 	data := (*res)["data"].([]interface{})
 	for _, itemBig := range data {
@@ -420,7 +420,7 @@ func (o *OrderBookBranch) InitialOrderBook(res *map[string]interface{}) {
 	o.SnapShoted = true
 }
 
-type OkexWebsocket struct {
+type wS struct {
 	Channel       string
 	OnErr         bool
 	Logger        *log.Logger
@@ -433,13 +433,13 @@ type OkexSubscribeMessage struct {
 	Args []string `json:"args,omitempty"`
 }
 
-func (w *OkexWebsocket) OutOkexErr() map[string]interface{} {
+func (w *wS) outOkexErr() map[string]interface{} {
 	w.OnErr = true
 	m := make(map[string]interface{})
 	return m
 }
 
-func DecodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{}, err error) {
+func decodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{}, err error) {
 	body := flate.NewReader(bytes.NewReader(*message))
 	if err != nil {
 		return nil, err
@@ -450,21 +450,21 @@ func DecodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{
 	}
 	err = json.Unmarshal(enflated, &res)
 	if err != nil {
-		if try := Bytes2String(enflated); try != "pong" {
+		if try := bytes2String(enflated); try != "pong" {
 			return nil, err
 		}
 	}
 	return res, nil
 }
 
-func OkexOrderBookSocket(
+func okexOrderBookSocket(
 	ctx context.Context,
 	url, symbol, channel string,
 	logger *log.Logger,
 	mainCh *chan map[string]interface{},
 	refreshCh *chan error,
 ) error {
-	var w OkexWebsocket
+	var w wS
 	var duration time.Duration = 30
 	w.Logger = logger
 	w.OnErr = false
@@ -476,7 +476,7 @@ func OkexOrderBookSocket(
 	logger.Infof("Okex %s orderBook socket connected.\n", symbol)
 	w.Conn = conn
 	defer conn.Close()
-	send := GetOkexSubscribeMessage(channel, symbol)
+	send := getOkexSubscribeMessage(channel, symbol)
 	if err := w.Conn.WriteMessage(websocket.TextMessage, send); err != nil {
 		return err
 	}
@@ -493,7 +493,7 @@ func OkexOrderBookSocket(
 			case <-innerErr:
 				return
 			case <-PingManaging.C:
-				send := w.GetPingPong()
+				send := w.getPingPong()
 				if err := w.Conn.WriteMessage(websocket.TextMessage, send); err != nil {
 					w.Conn.SetReadDeadline(time.Now().Add(time.Second))
 					return
@@ -513,7 +513,7 @@ func OkexOrderBookSocket(
 			return err
 		default:
 			if conn == nil {
-				d := w.OutOkexErr()
+				d := w.outOkexErr()
 				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message)
@@ -522,25 +522,25 @@ func OkexOrderBookSocket(
 			}
 			_, buf, err := conn.ReadMessage()
 			if err != nil {
-				d := w.OutOkexErr()
+				d := w.outOkexErr()
 				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message)
 				innerErr <- errors.New("restart")
 				return errors.New(message)
 			}
-			res, err1 := DecodingMap(&buf, logger)
+			res, err1 := decodingMap(&buf, logger)
 			if err1 != nil {
-				d := w.OutOkexErr()
+				d := w.outOkexErr()
 				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message, err1)
 				innerErr <- errors.New("restart")
 				return err1
 			}
-			err2 := w.HandleOkexSocketData(&res, mainCh)
+			err2 := w.handleOkexSocketData(&res, mainCh)
 			if err2 != nil {
-				d := w.OutOkexErr()
+				d := w.outOkexErr()
 				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message, err2)
@@ -554,7 +554,7 @@ func OkexOrderBookSocket(
 	}
 }
 
-func (w *OkexWebsocket) HandleOkexSocketData(res *map[string]interface{}, mainCh *chan map[string]interface{}) error {
+func (w *wS) handleOkexSocketData(res *map[string]interface{}, mainCh *chan map[string]interface{}) error {
 	if event, ok := (*res)["event"].(string); ok {
 		switch event {
 		case "subscribe":
@@ -564,47 +564,82 @@ func (w *OkexWebsocket) HandleOkexSocketData(res *map[string]interface{}, mainCh
 			}
 		}
 	} else {
-		if action, ok := (*res)["action"].(string); ok {
-			if dataSet, ok := (*res)["data"].([]interface{}); !ok {
-				m := w.OutOkexErr()
-				*mainCh <- m
-				return errors.New("got nil when getting data for event time")
-			} else {
-				for _, item := range dataSet {
-					data := item.(map[string]interface{})
-					if st, ok := data["timestamp"].(string); !ok {
-						m := w.OutOkexErr()
-						*mainCh <- m
-						return errors.New("got nil when updating event time")
-					} else {
-						stamp, err := TimeStringToDateTime(st)
-						if err != nil {
-							m := w.OutOkexErr()
+		if table, ok := (*res)["table"].(string); ok {
+
+			switch table {
+			case "spot/ticker":
+				if dataSet, ok := (*res)["data"].([]interface{}); !ok {
+					m := w.outOkexErr()
+					*mainCh <- m
+					return errors.New("got nil when getting data for event time")
+				} else {
+					for _, item := range dataSet {
+						data := item.(map[string]interface{})
+						if st, ok := data["timestamp"].(string); !ok {
+							m := w.outOkexErr()
 							*mainCh <- m
-							return errors.New("fail to parse time when getting event time")
-						}
-						if time.Now().After(stamp.Add(time.Second * 5)) {
-							m := w.OutOkexErr()
-							*mainCh <- m
-							return errors.New("websocket data delay more than 5 sec")
+							return errors.New("got nil when updating event time")
+						} else {
+							stamp, err := timeStringToDateTime(st)
+							if err != nil {
+								m := w.outOkexErr()
+								*mainCh <- m
+								return errors.New("fail to parse time when getting event time")
+							}
+							if time.Now().After(stamp.Add(time.Second * 5)) {
+								m := w.outOkexErr()
+								*mainCh <- m
+								return errors.New("websocket data delay more than 5 sec")
+							}
 						}
 					}
 				}
-			}
-			switch action {
-			case "partial":
 				*mainCh <- *res
 				return nil
-			case "update":
-				*mainCh <- *res
-				return nil
+			case "spot/depth_l2_tbt":
+				if action, ok := (*res)["action"].(string); ok {
+					if dataSet, ok := (*res)["data"].([]interface{}); !ok {
+						m := w.outOkexErr()
+						*mainCh <- m
+						return errors.New("got nil when getting data for event time")
+					} else {
+						for _, item := range dataSet {
+							data := item.(map[string]interface{})
+							if st, ok := data["timestamp"].(string); !ok {
+								m := w.outOkexErr()
+								*mainCh <- m
+								return errors.New("got nil when updating event time")
+							} else {
+								stamp, err := timeStringToDateTime(st)
+								if err != nil {
+									m := w.outOkexErr()
+									*mainCh <- m
+									return errors.New("fail to parse time when getting event time")
+								}
+								if time.Now().After(stamp.Add(time.Second * 5)) {
+									m := w.outOkexErr()
+									*mainCh <- m
+									return errors.New("websocket data delay more than 5 sec")
+								}
+							}
+						}
+					}
+					switch action {
+					case "partial":
+						*mainCh <- *res
+						return nil
+					case "update":
+						*mainCh <- *res
+						return nil
+					}
+				}
 			}
 		}
 	}
 	return nil
 }
 
-func GetOkexSubscribeMessage(channel, symbol string) (message []byte) {
+func getOkexSubscribeMessage(channel, symbol string) (message []byte) {
 	switch channel {
 	case "orderbook":
 		var buffer bytes.Buffer
@@ -620,16 +655,30 @@ func GetOkexSubscribeMessage(channel, symbol string) (message []byte) {
 			return nil
 		}
 		message = by
+	case "ticker":
+		var buffer bytes.Buffer
+		buffer.WriteString("spot/ticker:")
+		buffer.WriteString(symbol)
+		arg := buffer.String()
+		sub := OkexSubscribeMessage{
+			Op:   "subscribe",
+			Args: []string{arg},
+		}
+		by, err := json.Marshal(sub)
+		if err != nil {
+			return nil
+		}
+		message = by
 	}
 	return message
 }
 
-func (t *OkexWebsocket) GetPingPong() []byte {
+func (t *wS) getPingPong() []byte {
 	sub := "ping"
-	return String2Bytes(sub)
+	return string2Bytes(sub)
 }
 
-func String2Bytes(s string) []byte {
+func string2Bytes(s string) []byte {
 	sh := (*reflect.StringHeader)(unsafe.Pointer(&s))
 	bh := reflect.SliceHeader{
 		Data: sh.Data,
@@ -639,11 +688,11 @@ func String2Bytes(s string) []byte {
 	return *(*[]byte)(unsafe.Pointer(&bh))
 }
 
-func Bytes2String(b []byte) string {
+func bytes2String(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-func (o *OrderBookBranch) CheckCheckSum(checkSum uint32) error {
+func (o *OrderBookBranch) checkCheckSum(checkSum uint32) error {
 	o.Bids.mux.RLock()
 	o.Asks.mux.RLock()
 	defer o.Bids.mux.RUnlock()
@@ -664,14 +713,14 @@ func (o *OrderBookBranch) CheckCheckSum(checkSum uint32) error {
 		}
 	}
 	result := strings.Join(list, ":")
-	localCheckSum := crc32.ChecksumIEEE(String2Bytes(result))
+	localCheckSum := crc32.ChecksumIEEE(string2Bytes(result))
 	if localCheckSum != checkSum {
 		return errors.New("checkSum error")
 	}
 	return nil
 }
 
-func TimeStringToDateTime(input string) (time.Time, error) {
+func timeStringToDateTime(input string) (time.Time, error) {
 	layout := "2006-01-02T15:04:05.999Z"
 	t, err := time.Parse(layout, input)
 	if err != nil {
