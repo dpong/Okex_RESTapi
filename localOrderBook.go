@@ -1,12 +1,9 @@
 package okexapi
 
 import (
-	"bytes"
-	"compress/flate"
 	"context"
 	"errors"
 	"hash/crc32"
-	"io/ioutil"
 	"reflect"
 	"strings"
 	"sync"
@@ -279,46 +276,46 @@ func (o *OrderBookBranch) GetAsksEnoughForValue(value decimal.Decimal) ([][]stri
 }
 
 // symbol example: UST-USDT
-func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBranch {
-	var o OrderBookBranch
-	ctx, cancel := context.WithCancel(context.Background())
-	o.Cancel = &cancel
-	bookticker := make(chan map[string]interface{}, 50)
-	refreshCh := make(chan error, 5)
-	o.reCh = make(chan error, 5)
-	symbol = strings.ToUpper(symbol)
-	url := c.SocketEndPointHub(false)
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				if err := okexOrderBookSocket(ctx, url, symbol, "orderbook", logger, &bookticker, &refreshCh); err == nil {
-					return
-				}
-				// connection limit by okex
-				time.Sleep(time.Second)
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				err := o.maintainOrderBook(ctx, symbol, &bookticker)
-				if err == nil {
-					return
-				}
-				logger.Warningf("refreshing %s local orderbook cause: %s", symbol, err.Error())
-				refreshCh <- errors.New("refreshing from maintain orderbook")
-			}
-		}
-	}()
-	return &o
-}
+// func (c *Client) LocalOrderBook(symbol string, logger *log.Logger) *OrderBookBranch {
+// 	var o OrderBookBranch
+// 	ctx, cancel := context.WithCancel(context.Background())
+// 	o.Cancel = &cancel
+// 	bookticker := make(chan map[string]interface{}, 50)
+// 	refreshCh := make(chan error, 5)
+// 	o.reCh = make(chan error, 5)
+// 	symbol = strings.ToUpper(symbol)
+// 	url := c.SocketEndPointHub(false)
+// 	go func() {
+// 		for {
+// 			select {
+// 			case <-ctx.Done():
+// 				return
+// 			default:
+// 				if err := okexOrderBookSocket(ctx, url, symbol, "orderbook", logger, &bookticker, &refreshCh); err == nil {
+// 					return
+// 				}
+// 				// connection limit by okex
+// 				time.Sleep(time.Second)
+// 			}
+// 		}
+// 	}()
+// 	go func() {
+// 		for {
+// 			select {
+// 			case <-ctx.Done():
+// 				return
+// 			default:
+// 				err := o.maintainOrderBook(ctx, symbol, &bookticker)
+// 				if err == nil {
+// 					return
+// 				}
+// 				logger.Warningf("refreshing %s local orderbook cause: %s", symbol, err.Error())
+// 				refreshCh <- errors.New("refreshing from maintain orderbook")
+// 			}
+// 		}
+// 	}()
+// 	return &o
+// }
 
 func (o *OrderBookBranch) maintainOrderBook(
 	ctx context.Context,
@@ -426,11 +423,17 @@ type wS struct {
 	Logger        *log.Logger
 	Conn          *websocket.Conn
 	LastUpdatedId decimal.Decimal
+	lastPong      time.Time
 }
 
 type OkexSubscribeMessage struct {
-	Op   string   `json:"op"`
-	Args []string `json:"args,omitempty"`
+	Op   string     `json:"op"`
+	Args []argsData `json:"args,omitempty"`
+}
+
+type argsData struct {
+	Channel string `json:"channel"`
+	Instid  string `json:"instId"`
 }
 
 func (w *wS) outOkexErr() map[string]interface{} {
@@ -439,20 +442,39 @@ func (w *wS) outOkexErr() map[string]interface{} {
 	return m
 }
 
-func decodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{}, err error) {
-	body := flate.NewReader(bytes.NewReader(*message))
+// func decodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{}, err error) {
+// 	body := flate.NewReader(bytes.NewReader(*message))
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	enflated, err := ioutil.ReadAll(body)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+// 	err = json.Unmarshal(enflated, &res)
+// 	if err != nil {
+// 		if try := bytes2String(enflated); try != "pong" {
+// 			return nil, err
+// 		}
+// 	}
+// 	return res, nil
+// }
+
+func (w *wS) updateLastPongTime() {
+	w.lastPong = time.Now()
+}
+
+// for v5 api
+func (w *wS) decodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{}, err error) {
+	err = json.Unmarshal(*message, &res)
 	if err != nil {
-		return nil, err
-	}
-	enflated, err := ioutil.ReadAll(body)
-	if err != nil {
-		return nil, err
-	}
-	err = json.Unmarshal(enflated, &res)
-	if err != nil {
-		if try := bytes2String(enflated); try != "pong" {
+		if try := bytes2String(*message); try != "pong" {
 			return nil, err
 		}
+		w.updateLastPongTime()
+	}
+	if time.Now().After(w.lastPong.Add(time.Second * 30)) {
+		return res, errors.New("ping pong time out")
 	}
 	return res, nil
 }
@@ -504,6 +526,7 @@ func okexOrderBookSocket(
 			}
 		}
 	}()
+	w.updateLastPongTime()
 	for {
 		select {
 		case <-ctx.Done():
@@ -529,7 +552,7 @@ func okexOrderBookSocket(
 				innerErr <- errors.New("restart")
 				return errors.New(message)
 			}
-			res, err1 := decodingMap(&buf, logger)
+			res, err1 := w.decodingMap(&buf, logger)
 			if err1 != nil {
 				d := w.outOkexErr()
 				*mainCh <- d
@@ -558,81 +581,91 @@ func (w *wS) handleOkexSocketData(res *map[string]interface{}, mainCh *chan map[
 	if event, ok := (*res)["event"].(string); ok {
 		switch event {
 		case "subscribe":
-			if channel, ok := (*res)["channel"].(string); ok {
-				w.Logger.Infof("Subscribed %s", channel)
+			if arg, ok := (*res)["arg"].(map[string]interface{}); ok {
+				channel, okCh := arg["channel"].(string)
+				id, okId := arg["instId"].(string)
+				if okCh && okId {
+					w.Logger.Infof("Subscribed %s %s", id, channel)
+				}
 				return nil
 			}
 		}
 	} else {
-		if table, ok := (*res)["table"].(string); ok {
-
-			switch table {
-			case "spot/ticker":
-				if dataSet, ok := (*res)["data"].([]interface{}); !ok {
+		if arg, ok := (*res)["arg"].(map[string]interface{}); ok {
+			channel, okCh := arg["channel"].(string)
+			if !okCh {
+				return errors.New("got nil channel data")
+			}
+			switch channel {
+			case "books5":
+				if _, ok := (*res)["data"].([]interface{}); !ok {
 					m := w.outOkexErr()
 					*mainCh <- m
 					return errors.New("got nil when getting data for event time")
-				} else {
-					for _, item := range dataSet {
-						data := item.(map[string]interface{})
-						if st, ok := data["timestamp"].(string); !ok {
-							m := w.outOkexErr()
-							*mainCh <- m
-							return errors.New("got nil when updating event time")
-						} else {
-							stamp, err := timeStringToDateTime(st)
-							if err != nil {
-								m := w.outOkexErr()
-								*mainCh <- m
-								return errors.New("fail to parse time when getting event time")
-							}
-							if time.Now().After(stamp.Add(time.Second * 5)) {
-								m := w.outOkexErr()
-								*mainCh <- m
-								return errors.New("websocket data delay more than 5 sec")
-							}
-						}
-					}
+					// } else {
+					// 	for _, item := range dataSet {
+					// 		data := item.(map[string]interface{})
+					// 		if st, ok := data["ts"].(string); !ok {
+					// 			m := w.outOkexErr()
+					// 			*mainCh <- m
+					// 			return errors.New("got nil when updating event time")
+					// 		} else {
+					// 			f, err := strconv.ParseFloat(st, 64)
+					// 			if err != nil {
+					// 				m := w.outOkexErr()
+					// 				*mainCh <- m
+					// 				return errors.New("fail to parse time when getting event time")
+					// 			}
+					// 			stamp := formatingTimeStamp(f)
+					// 			if time.Now().After(stamp.Add(time.Second * 5)) {
+					// 				// test
+					// 				fmt.Println(time.Now(), stamp)
+					// 				m := w.outOkexErr()
+					// 				*mainCh <- m
+					// 				return errors.New("websocket data delay more than 5 sec")
+					// 			}
+					// 		}
+					// 	}
 				}
 				*mainCh <- *res
 				return nil
-			case "spot/depth_l2_tbt":
-				if action, ok := (*res)["action"].(string); ok {
-					if dataSet, ok := (*res)["data"].([]interface{}); !ok {
-						m := w.outOkexErr()
-						*mainCh <- m
-						return errors.New("got nil when getting data for event time")
-					} else {
-						for _, item := range dataSet {
-							data := item.(map[string]interface{})
-							if st, ok := data["timestamp"].(string); !ok {
-								m := w.outOkexErr()
-								*mainCh <- m
-								return errors.New("got nil when updating event time")
-							} else {
-								stamp, err := timeStringToDateTime(st)
-								if err != nil {
-									m := w.outOkexErr()
-									*mainCh <- m
-									return errors.New("fail to parse time when getting event time")
-								}
-								if time.Now().After(stamp.Add(time.Second * 5)) {
-									m := w.outOkexErr()
-									*mainCh <- m
-									return errors.New("websocket data delay more than 5 sec")
-								}
-							}
-						}
-					}
-					switch action {
-					case "partial":
-						*mainCh <- *res
-						return nil
-					case "update":
-						*mainCh <- *res
-						return nil
-					}
-				}
+				// case "spot/depth_l2_tbt":
+				// 	if action, ok := (*res)["action"].(string); ok {
+				// 		if dataSet, ok := (*res)["data"].([]interface{}); !ok {
+				// 			m := w.outOkexErr()
+				// 			*mainCh <- m
+				// 			return errors.New("got nil when getting data for event time")
+				// 		} else {
+				// 			for _, item := range dataSet {
+				// 				data := item.(map[string]interface{})
+				// 				if st, ok := data["timestamp"].(string); !ok {
+				// 					m := w.outOkexErr()
+				// 					*mainCh <- m
+				// 					return errors.New("got nil when updating event time")
+				// 				} else {
+				// 					stamp, err := timeStringToDateTime(st)
+				// 					if err != nil {
+				// 						m := w.outOkexErr()
+				// 						*mainCh <- m
+				// 						return errors.New("fail to parse time when getting event time")
+				// 					}
+				// 					if time.Now().After(stamp.Add(time.Second * 5)) {
+				// 						m := w.outOkexErr()
+				// 						*mainCh <- m
+				// 						return errors.New("websocket data delay more than 5 sec")
+				// 					}
+				// 				}
+				// 			}
+				// 		}
+				// 		switch action {
+				// 		case "partial":
+				// 			*mainCh <- *res
+				// 			return nil
+				// 		case "update":
+				// 			*mainCh <- *res
+				// 			return nil
+				// 		}
+				// 	}
 			}
 		}
 	}
@@ -641,28 +674,28 @@ func (w *wS) handleOkexSocketData(res *map[string]interface{}, mainCh *chan map[
 
 func getOkexSubscribeMessage(channel, symbol string) (message []byte) {
 	switch channel {
-	case "orderbook":
-		var buffer bytes.Buffer
-		buffer.WriteString("spot/depth_l2_tbt:")
-		buffer.WriteString(symbol)
-		arg := buffer.String()
-		sub := OkexSubscribeMessage{
-			Op:   "subscribe",
-			Args: []string{arg},
-		}
-		by, err := json.Marshal(sub)
-		if err != nil {
-			return nil
-		}
-		message = by
+	// case "orderbook":
+	// 	var buffer bytes.Buffer
+	// 	buffer.WriteString("spot/depth_l2_tbt:")
+	// 	buffer.WriteString(symbol)
+	// 	arg := buffer.String()
+	// 	sub := OkexSubscribeMessage{
+	// 		Op:   "subscribe",
+	// 		Args: []string{arg},
+	// 	}
+	// 	by, err := json.Marshal(sub)
+	// 	if err != nil {
+	// 		return nil
+	// 	}
+	// 	message = by
 	case "ticker":
-		var buffer bytes.Buffer
-		buffer.WriteString("spot/ticker:")
-		buffer.WriteString(symbol)
-		arg := buffer.String()
+		arg := argsData{
+			Channel: "books5",
+			Instid:  symbol,
+		}
 		sub := OkexSubscribeMessage{
 			Op:   "subscribe",
-			Args: []string{arg},
+			Args: []argsData{arg},
 		}
 		by, err := json.Marshal(sub)
 		if err != nil {

@@ -125,44 +125,49 @@ func (s *StreamTickerBranch) maintainStreamTicker(
 	ticker *chan map[string]interface{},
 	errCh *chan error,
 ) error {
-	lastUpdate := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case message := <-(*ticker):
-			var bidPrice, askPrice, bidQty, askQty string
-			dataSet := message["data"].([]interface{})
-			for _, item := range dataSet {
-				data := item.(map[string]interface{})
-				if bid, ok := data["best_bid"].(string); ok {
-					bidPrice = bid
-				} else {
-					bidPrice = NullPrice
+
+			if dataSets, ok := message["data"].([]interface{}); !ok {
+				continue
+			} else {
+				var bidPrice, askPrice, bidQty, askQty string
+				for _, item := range dataSets {
+					dataSet := item.(map[string]interface{})
+					if asks, ok := dataSet["asks"].([]interface{}); ok {
+						if len(asks) != 0 {
+							tob := asks[0].([]interface{})
+							if ask, ok := tob[0].(string); ok {
+								askPrice = ask
+							} else {
+								askPrice = NullPrice
+							}
+							if askqty, ok := tob[1].(string); ok {
+								askQty = askqty
+							}
+						}
+					}
+					if bids, ok := dataSet["bids"].([]interface{}); ok {
+						if len(bids) != 0 {
+							tob := bids[0].([]interface{})
+							if bid, ok := tob[0].(string); ok {
+								bidPrice = bid
+							} else {
+								bidPrice = NullPrice
+							}
+							if bidqty, ok := tob[1].(string); ok {
+								bidQty = bidqty
+							}
+						}
+
+					}
 				}
-				if ask, ok := data["best_ask"].(string); ok {
-					askPrice = ask
-				} else {
-					askPrice = NullPrice
-				}
-				if bidqty, ok := data["best_bid_size"].(string); ok {
-					bidQty = bidqty
-				}
-				if askqty, ok := data["best_ask_size"].(string); ok {
-					askQty = askqty
-				}
+				s.updateBidData(bidPrice, bidQty)
+				s.updateAskData(askPrice, askQty)
 			}
-			s.updateBidData(bidPrice, bidQty)
-			s.updateAskData(askPrice, askQty)
-			lastUpdate = time.Now()
-		default:
-			if time.Now().After(lastUpdate.Add(time.Second * 10)) {
-				// 10 sec without updating
-				err := errors.New("reconnect because of time out")
-				*errCh <- err
-				return err
-			}
-			time.Sleep(time.Millisecond * 100)
 		}
 	}
 }
@@ -213,6 +218,7 @@ func okexTickerSocket(
 			}
 		}
 	}()
+	w.updateLastPongTime()
 	for {
 		select {
 		case <-ctx.Done():
@@ -235,7 +241,7 @@ func okexTickerSocket(
 				innerErr <- errors.New("restart")
 				return errors.New(message)
 			}
-			res, err1 := decodingMap(&buf, logger)
+			res, err1 := w.decodingMap(&buf, logger)
 			if err1 != nil {
 				d := w.outOkexErr()
 				*mainCh <- d
@@ -264,4 +270,9 @@ func (s *StreamTickerBranch) outOkexErr() map[string]interface{} {
 	s.socket.OnErr = true
 	m := make(map[string]interface{})
 	return m
+}
+
+func formatingTimeStamp(timeFloat float64) time.Time {
+	t := time.Unix(int64(timeFloat/1000), 0)
+	return t
 }
