@@ -418,11 +418,10 @@ func (o *OrderBookBranch) initialOrderBook(res *map[string]interface{}) {
 }
 
 type wS struct {
-	Channel       string
-	OnErr         bool
-	Logger        *log.Logger
-	Conn          *websocket.Conn
-	LastUpdatedId decimal.Decimal
+	channel       string
+	logger        *log.Logger
+	conn          *websocket.Conn
+	lastUpdatedId decimal.Decimal
 	lastPong      time.Time
 }
 
@@ -434,12 +433,6 @@ type OkexSubscribeMessage struct {
 type argsData struct {
 	Channel string `json:"channel"`
 	Instid  string `json:"instId"`
-}
-
-func (w *wS) outOkexErr() map[string]interface{} {
-	w.OnErr = true
-	m := make(map[string]interface{})
-	return m
 }
 
 // func decodingMap(message *[]byte, logger *log.Logger) (res map[string]interface{}, err error) {
@@ -488,21 +481,20 @@ func okexOrderBookSocket(
 ) error {
 	var w wS
 	var duration time.Duration = 30
-	w.Logger = logger
-	w.OnErr = false
+	w.logger = logger
 	innerErr := make(chan error, 1)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		return err
 	}
 	logger.Infof("Okex %s orderBook socket connected.\n", symbol)
-	w.Conn = conn
+	w.conn = conn
 	defer conn.Close()
 	send := getOkexSubscribeMessage(channel, symbol)
-	if err := w.Conn.WriteMessage(websocket.TextMessage, send); err != nil {
+	if err := w.conn.WriteMessage(websocket.TextMessage, send); err != nil {
 		return err
 	}
-	if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+	if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 		return err
 	}
 	go func() {
@@ -516,11 +508,11 @@ func okexOrderBookSocket(
 				return
 			case <-PingManaging.C:
 				send := w.getPingPong()
-				if err := w.Conn.WriteMessage(websocket.TextMessage, send); err != nil {
-					w.Conn.SetReadDeadline(time.Now().Add(time.Second))
+				if err := w.conn.WriteMessage(websocket.TextMessage, send); err != nil {
+					w.conn.SetReadDeadline(time.Now().Add(time.Second))
 					return
 				}
-				w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration))
+				w.conn.SetReadDeadline(time.Now().Add(time.Second * duration))
 			default:
 				time.Sleep(time.Second)
 			}
@@ -535,18 +527,14 @@ func okexOrderBookSocket(
 			innerErr <- errors.New("restart")
 			return err
 		default:
-			if conn == nil {
-				d := w.outOkexErr()
-				*mainCh <- d
+			if w.conn == nil {
 				message := "Okex reconnect..."
 				logger.Infoln(message)
 				innerErr <- errors.New("restart")
 				return errors.New(message)
 			}
-			_, buf, err := conn.ReadMessage()
+			_, buf, err := w.conn.ReadMessage()
 			if err != nil {
-				d := w.outOkexErr()
-				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message)
 				innerErr <- errors.New("restart")
@@ -554,8 +542,6 @@ func okexOrderBookSocket(
 			}
 			res, err1 := w.decodingMap(&buf, logger)
 			if err1 != nil {
-				d := w.outOkexErr()
-				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message, err1)
 				innerErr <- errors.New("restart")
@@ -563,14 +549,12 @@ func okexOrderBookSocket(
 			}
 			err2 := w.handleOkexSocketData(&res, mainCh)
 			if err2 != nil {
-				d := w.outOkexErr()
-				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message, err2)
 				innerErr <- errors.New("restart")
 				return err2
 			}
-			if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+			if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 				return err
 			}
 		}
@@ -585,7 +569,7 @@ func (w *wS) handleOkexSocketData(res *map[string]interface{}, mainCh *chan map[
 				channel, okCh := arg["channel"].(string)
 				id, okId := arg["instId"].(string)
 				if okCh && okId {
-					w.Logger.Infof("Subscribed %s %s", id, channel)
+					w.logger.Infof("Subscribed %s %s", id, channel)
 				}
 				return nil
 			}
@@ -599,8 +583,6 @@ func (w *wS) handleOkexSocketData(res *map[string]interface{}, mainCh *chan map[
 			switch channel {
 			case "books5":
 				if _, ok := (*res)["data"].([]interface{}); !ok {
-					m := w.outOkexErr()
-					*mainCh <- m
 					return errors.New("got nil when getting data for event time")
 					// } else {
 					// 	for _, item := range dataSet {

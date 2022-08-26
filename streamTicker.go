@@ -3,6 +3,7 @@ package okexapi
 import (
 	"context"
 	"errors"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +26,7 @@ type tobBranch struct {
 	mux   sync.RWMutex
 	price string
 	qty   string
+	ts    time.Time
 }
 
 // func SwapStreamTicker(symbol string, logger *log.Logger) *StreamTickerBranch {
@@ -83,40 +85,44 @@ func (s *StreamTickerBranch) Close() {
 	s.ask.mux.Unlock()
 }
 
-func (s *StreamTickerBranch) GetBid() (price, qty string, ok bool) {
+func (s *StreamTickerBranch) GetBid() (price, qty string, timeStamp time.Time, ok bool) {
 	s.bid.mux.RLock()
 	defer s.bid.mux.RUnlock()
 	price = s.bid.price
 	qty = s.bid.qty
 	if price == NullPrice || price == "" {
-		return price, qty, false
+		return price, qty, timeStamp, false
 	}
-	return price, qty, true
+	timeStamp = s.bid.ts
+	return price, qty, timeStamp, true
 }
 
-func (s *StreamTickerBranch) GetAsk() (price, qty string, ok bool) {
+func (s *StreamTickerBranch) GetAsk() (price, qty string, timeStamp time.Time, ok bool) {
 	s.ask.mux.RLock()
 	defer s.ask.mux.RUnlock()
 	price = s.ask.price
 	qty = s.ask.qty
 	if price == NullPrice || price == "" {
-		return price, qty, false
+		return price, qty, timeStamp, false
 	}
-	return price, qty, true
+	timeStamp = s.ask.ts
+	return price, qty, timeStamp, true
 }
 
-func (s *StreamTickerBranch) updateBidData(price, qty string) {
+func (s *StreamTickerBranch) updateBidData(price, qty string, timeStamp time.Time) {
 	s.bid.mux.Lock()
 	defer s.bid.mux.Unlock()
 	s.bid.price = price
 	s.bid.qty = qty
+	s.bid.ts = timeStamp
 }
 
-func (s *StreamTickerBranch) updateAskData(price, qty string) {
+func (s *StreamTickerBranch) updateAskData(price, qty string, timeStamp time.Time) {
 	s.ask.mux.Lock()
 	defer s.ask.mux.Unlock()
 	s.ask.price = price
 	s.ask.qty = qty
+	s.ask.ts = timeStamp
 }
 
 func (s *StreamTickerBranch) maintainStreamTicker(
@@ -130,11 +136,11 @@ func (s *StreamTickerBranch) maintainStreamTicker(
 		case <-ctx.Done():
 			return nil
 		case message := <-(*ticker):
-
 			if dataSets, ok := message["data"].([]interface{}); !ok {
 				continue
 			} else {
 				var bidPrice, askPrice, bidQty, askQty string
+				var timeStamp time.Time
 				for _, item := range dataSets {
 					dataSet := item.(map[string]interface{})
 					if asks, ok := dataSet["asks"].([]interface{}); ok {
@@ -164,9 +170,14 @@ func (s *StreamTickerBranch) maintainStreamTicker(
 						}
 
 					}
+					if ts, ok := dataSet["ts"].(string); ok {
+						tsInt, _ := strconv.ParseInt(ts, 10, 64)
+						timeStamp = time.UnixMilli(tsInt)
+					}
+
 				}
-				s.updateBidData(bidPrice, bidQty)
-				s.updateAskData(askPrice, askQty)
+				s.updateBidData(bidPrice, bidQty, timeStamp)
+				s.updateAskData(askPrice, askQty, timeStamp)
 			}
 		}
 	}
@@ -180,21 +191,20 @@ func okexTickerSocket(
 ) error {
 	var w wS
 	var duration time.Duration = 30
-	w.Logger = logger
-	w.OnErr = false
+	w.logger = logger
 	innerErr := make(chan error, 1)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		return err
 	}
 	logger.Infof("Okex %s ticker socket connected.\n", symbol)
-	w.Conn = conn
+	w.conn = conn
 	defer conn.Close()
 	send := getOkexSubscribeMessage(channel, symbol)
-	if err := w.Conn.WriteMessage(websocket.TextMessage, send); err != nil {
+	if err := w.conn.WriteMessage(websocket.TextMessage, send); err != nil {
 		return err
 	}
-	if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+	if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 		return err
 	}
 	go func() {
@@ -208,11 +218,11 @@ func okexTickerSocket(
 				return
 			case <-PingManaging.C:
 				send := w.getPingPong()
-				if err := w.Conn.WriteMessage(websocket.TextMessage, send); err != nil {
-					w.Conn.SetReadDeadline(time.Now().Add(time.Second))
+				if err := w.conn.WriteMessage(websocket.TextMessage, send); err != nil {
+					w.conn.SetReadDeadline(time.Now().Add(time.Second))
 					return
 				}
-				w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration))
+				w.conn.SetReadDeadline(time.Now().Add(time.Second * duration))
 			default:
 				time.Sleep(time.Second)
 			}
@@ -224,18 +234,14 @@ func okexTickerSocket(
 		case <-ctx.Done():
 			return nil
 		default:
-			if conn == nil {
-				d := w.outOkexErr()
-				*mainCh <- d
+			if w.conn == nil {
 				message := "Okex reconnect..."
 				logger.Infoln(message)
 				innerErr <- errors.New("restart")
 				return errors.New(message)
 			}
-			_, buf, err := conn.ReadMessage()
+			_, buf, err := w.conn.ReadMessage()
 			if err != nil {
-				d := w.outOkexErr()
-				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message)
 				innerErr <- errors.New("restart")
@@ -243,8 +249,6 @@ func okexTickerSocket(
 			}
 			res, err1 := w.decodingMap(&buf, logger)
 			if err1 != nil {
-				d := w.outOkexErr()
-				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message, err1)
 				innerErr <- errors.New("restart")
@@ -252,27 +256,14 @@ func okexTickerSocket(
 			}
 			err2 := w.handleOkexSocketData(&res, mainCh)
 			if err2 != nil {
-				d := w.outOkexErr()
-				*mainCh <- d
 				message := "Okex reconnect..."
 				logger.Infoln(message, err2)
 				innerErr <- errors.New("restart")
 				return err2
 			}
-			if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+			if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 				return err
 			}
 		}
 	}
-}
-
-func (s *StreamTickerBranch) outOkexErr() map[string]interface{} {
-	s.socket.OnErr = true
-	m := make(map[string]interface{})
-	return m
-}
-
-func formatingTimeStamp(timeFloat float64) time.Time {
-	t := time.Unix(int64(timeFloat/1000), 0)
-	return t
 }
